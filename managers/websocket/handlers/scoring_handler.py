@@ -48,9 +48,13 @@ class ScoringHandler:
             
             processed_stats = self._process_player_stats(players_data)
             mvp_igns = self._determine_mvps(players_data, provided_mvps)
-            bedbreaker_igns = provided_bedbreakers or []
-            
-            
+
+            # Determine bed breakers from stats if not provided
+            if provided_bedbreakers:
+                bedbreaker_igns = provided_bedbreakers
+            else:
+                bedbreaker_igns = [ign for ign, stats in players_data.items() if stats.get('bedbroke', False)]
+
             mvp_ids = await self._convert_igns_to_ids(mvp_igns)
             bedbreaker_ids = await self._convert_igns_to_ids(bedbreaker_igns)
             
@@ -116,30 +120,33 @@ class ScoringHandler:
     
     def _determine_mvps(self, players_data: Dict[str, Dict[str, Any]], provided_mvps: List[str]) -> List[str]:
         try:
-            
             if provided_mvps:
                 self.logger.debug(f"Using provided MVPs: {provided_mvps}")
                 return provided_mvps
             
-            
             if not players_data:
                 self.logger.warning("No player data available for MVP determination")
                 return []
-            
-            
-            max_kills = 0
-            for stats in players_data.values():
-                kills = int(stats.get('kills', 0))
-                if kills > max_kills:
-                    max_kills = kills
-            
-            
-            mvps = []
+
+            # Calculate a score for each player (e.g., final kills are worth more)
+            player_scores = {}
             for ign, stats in players_data.items():
-                if int(stats.get('kills', 0)) == max_kills and max_kills > 0:
-                    mvps.append(ign)
+                kills = int(stats.get('kills', 0))
+                final_kills = int(stats.get('finalkills', 0))
+                player_scores[ign] = kills + (2 * final_kills)
+
+            if not player_scores:
+                return []
+
+            max_score = max(player_scores.values())
             
-            self.logger.debug(f"Determined MVPs based on {max_kills} kills: {mvps}")
+            if max_score == 0:
+                self.logger.debug("No player scored any points for MVP consideration.")
+                return []
+
+            mvps = [ign for ign, score in player_scores.items() if score == max_score]
+            
+            self.logger.debug(f"Determined MVPs based on a max score of {max_score}: {mvps}")
             return mvps
             
         except Exception as e:

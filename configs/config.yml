@@ -58,6 +58,7 @@ websocket:
   timeout: 60                     # Request timeout in seconds
   max_retry_attempts: 3           # Maximum warp retry attempts
   queue_broadcast_interval: 1.0   # Queue status broadcast interval
+  auth_token: "replace-this-with-a-secure-secret-token" # Secret token to authenticate the Minecraft plugin
 
 workers:
   enabled: true

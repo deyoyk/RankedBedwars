@@ -8,6 +8,7 @@ import os
 import random
 import string
 import asyncio
+import aiohttp
 
 from managers.permission_manager import PermissionManager
 from utils.embed_builder import EmbedBuilder
@@ -70,7 +71,21 @@ class RegisterCommands(commands.Cog):
     
     def generate_verification_code(self) -> str:
         return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    
+
+    async def get_minecraft_uuid(self, username: str) -> Optional[str]:
+        url = f"https://api.mojang.com/users/profiles/minecraft/{username}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return data.get("id")
+                    else:
+                        return None
+        except Exception as e:
+            self.bot.logger.error(f"Error fetching Minecraft UUID for {username}: {e}")
+            return None
+
     async def check_player_online(self, ign: str) -> bool:
         if not self.websocket_enabled or not self.ws_manager:
             return False
@@ -148,12 +163,13 @@ class RegisterCommands(commands.Cog):
             
         
         ign = verification["ign"]
-        await self.register_player(interaction, ign, verified=True)
+        uuid = verification["uuid"]
+        await self.register_player(interaction, ign, uuid, verified=True)
         
         
         del self.pending_verifications[user_id]
 
-    async def start_websocket_verification(self, interaction_or_ctx, ign: str, is_prefix: bool = False) -> bool:
+    async def start_websocket_verification(self, interaction_or_ctx, ign: str, uuid: str, is_prefix: bool = False) -> bool:
         user = interaction_or_ctx.user if not is_prefix else interaction_or_ctx.author
         user_id = str(user.id)
         
@@ -186,6 +202,7 @@ class RegisterCommands(commands.Cog):
         self.pending_verifications[user_id] = {
             "code": verification_code,
             "ign": ign,
+            "uuid": uuid,
             "expires": expiration
         }
         
@@ -232,13 +249,13 @@ class RegisterCommands(commands.Cog):
         
         return False  
         
-    async def register_player(self, interaction_or_ctx, ign: str, is_prefix: bool = False, verified: bool = False) -> None:
+    async def register_player(self, interaction_or_ctx, ign: str, uuid: str, is_prefix: bool = False, verified: bool = False) -> None:
         try:
             user = interaction_or_ctx.user if not is_prefix else interaction_or_ctx.author
 
             
             if not verified and self.websocket_enabled and self.ws_manager:
-                started = await self.start_websocket_verification(interaction_or_ctx, ign, is_prefix)
+                started = await self.start_websocket_verification(interaction_or_ctx, ign, uuid, is_prefix)
                 if not started:
                     return  
             
@@ -261,6 +278,7 @@ class RegisterCommands(commands.Cog):
             document = {
                 'discordid': str(user.id),
                 'ign': ign,
+                'minecraft_uuid': uuid,
                 'exp': 0,
                 'totalexp': 0,
                 'level': 1,
@@ -303,7 +321,11 @@ class RegisterCommands(commands.Cog):
             if is_prefix:
                 await msg.edit(embed=success_embed)
             else:
-                await interaction_or_ctx.edit_original_response(embed=success_embed)
+                if interaction_or_ctx.response.is_done():
+                    await interaction_or_ctx.edit_original_response(embed=success_embed)
+                else:
+                    await interaction_or_ctx.response.send_message(embed=success_embed, ephemeral=True)
+
 
             
             try:
@@ -317,6 +339,7 @@ class RegisterCommands(commands.Cog):
                     )
                     log_embed.add_field(name="User", value=f"<@{user.id}> ({user.id})", inline=True)
                     log_embed.add_field(name="IGN", value=f"`{ign}`", inline=True)
+                    log_embed.add_field(name="UUID", value=f"`{uuid}`", inline=True)
                     log_embed.add_field(name="Method", value="Prefix Command" if is_prefix else "Slash Command", inline=True)
                     log_embed.add_field(name="Registered By", value=f"<@{user.id}> ({user.id})", inline=True)
                     log_embed.set_footer(text=f"Guild ID: {interaction_or_ctx.guild.id if hasattr(interaction_or_ctx, 'guild') and interaction_or_ctx.guild else 'N/A'}")
@@ -354,6 +377,18 @@ class RegisterCommands(commands.Cog):
 
         try:
             
+            uuid = await self.get_minecraft_uuid(ign)
+            if not uuid:
+                await interaction.response.send_message(
+                    embed=self.embed_builder.build_error(
+                        title="Invalid IGN",
+                        description=f"The Minecraft username `{ign}` does not exist. Please check the spelling."
+                    ),
+                    ephemeral=True
+                )
+                return
+
+
             query = {'discordid': str(interaction.user.id)}
             player = self.bot.database_manager.find_one('users', query)
 
@@ -379,7 +414,7 @@ class RegisterCommands(commands.Cog):
                 return
                 
             
-            await self.register_player(interaction, ign)
+            await self.register_player(interaction, ign, uuid)
 
         except Exception as e:
             await self.error_handler.handle_error(e, 'player registration')
@@ -403,6 +438,15 @@ class RegisterCommands(commands.Cog):
 
         try:
             
+            uuid = await self.get_minecraft_uuid(ign)
+            if not uuid:
+                await ctx.reply(embed=self.embed_builder.build_error(
+                    title="Invalid IGN",
+                    description=f"The Minecraft username `{ign}` does not exist. Please check the spelling."
+                ))
+                return
+
+
             query = {'discordid': str(ctx.author.id)}
             player = self.bot.database_manager.find_one('users', query)
 
@@ -422,7 +466,7 @@ class RegisterCommands(commands.Cog):
                 return
                 
             
-            await self.register_player(ctx, ign, is_prefix=True)
+            await self.register_player(ctx, ign, uuid, is_prefix=True)
 
         except Exception as e:
             await self.error_handler.handle_error(e, 'prefix register')

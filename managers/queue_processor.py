@@ -347,6 +347,42 @@ class QueueProcessor:
         
         return batch, used_parties
     
+    async def _send_start_game_websocket_event(self, game_id: str, queue_settings: dict, team1: List[int], team2: List[int]):
+        if not self.websocket_enabled or not self.ws_manager:
+            return
+
+        try:
+            team1_data = []
+            for player_id in team1:
+                user_doc = self.db_manager.find_one('users', {'discordid': str(player_id)})
+                if user_doc and 'minecraft_uuid' in user_doc:
+                    team1_data.append({'uuid': user_doc['minecraft_uuid'], 'ign': user_doc['ign']})
+
+            team2_data = []
+            for player_id in team2:
+                user_doc = self.db_manager.find_one('users', {'discordid': str(player_id)})
+                if user_doc and 'minecraft_uuid' in user_doc:
+                    team2_data.append({'uuid': user_doc['minecraft_uuid'], 'ign': user_doc['ign']})
+
+            if len(team1_data) != len(team1) or len(team2_data) != len(team2):
+                logging.warning(f"Could not find UUIDs for all players in game {game_id}. Aborting WebSocket START_GAME message.")
+                return
+
+            start_game_message = {
+                "type": "START_GAME",
+                "game_id": game_id,
+                "game_mode": queue_settings.get('gametype', 'unknown'),
+                "teams": {
+                    "team1": team1_data,
+                    "team2": team2_data
+                }
+            }
+            await self.ws_manager.broadcast(start_game_message)
+            logging.info(f"Sent START_GAME event for game {game_id} via WebSocket.")
+
+        except Exception as e:
+            logging.error(f"Failed to send START_GAME WebSocket event for game {game_id}: {e}", exc_info=True)
+
     async def _start_game_batch(self, channel_id: str, batch: List[int], queue_settings: dict):
         try:
             logging.info(f"Starting game for batch of {len(batch)} players from queue {channel_id}")
@@ -382,6 +418,9 @@ class QueueProcessor:
                 logging.debug(f"Generated new game ID due to collision: {game_id}")
             
             
+            await self._send_start_game_websocket_event(game_id, queue_settings, team1, team2)
+
+
             game_text_channel = await self.create_game_channels(game_id, team1, team2)
             if not game_text_channel:
                 logging.error(f"Failed to create game channels for game {game_id}")

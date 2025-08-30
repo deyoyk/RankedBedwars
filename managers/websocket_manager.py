@@ -19,12 +19,16 @@ class WebSocketManager:
         
         websocket_config = config.get('websocket', {})
         self.enabled = websocket_config.get('enabled', False)
-        self.host = websocket_config.get('host', '0.0.0.0')  
+        self.host = websocket_config.get('host', '0.0.0.0')
         self.port = websocket_config.get('port', 8080)
         self.path = websocket_config.get('path', '/rbw/websocket')
+        self.auth_token = websocket_config.get('auth_token')
         self.timeout = websocket_config.get('timeout', 60)
         self.max_retry_attempts = websocket_config.get('max_retry_attempts', 3)
         self.queue_broadcast_interval = websocket_config.get('queue_broadcast_interval', 1.0)
+
+        if self.enabled and not self.auth_token:
+            self.logger.warning("WebSocket is enabled but no auth_token is set in config.yml. Connections will fail.")
         
         
         self.clients: Set[WebSocketServerProtocol] = set()
@@ -192,42 +196,55 @@ class WebSocketManager:
             await websocket.close(code=1000, reason="WebSocket system disabled")
             return
         
-        
         if path != self.path:
             self.logger.warning(f"Connection attempted with invalid path: {path}")
             await websocket.close(code=1000, reason="Invalid path")
             return
-        
-        client_address = "unknown"
+
+        client_address = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}" if websocket.remote_address else "unknown"
+
         try:
-            client_address = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
+            auth_message_str = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+            auth_message = json.loads(auth_message_str)
+
+            if auth_message.get("type") != "auth" or auth_message.get("token") != self.auth_token:
+                self.logger.warning(f"WebSocket connection failed authentication from {client_address}")
+                await websocket.close(code=1011, reason="Authentication failed")
+                return
+
+            self.logger.info(f"WebSocket client authenticated successfully from {client_address}")
+
+        except asyncio.TimeoutError:
+            self.logger.warning(f"WebSocket connection from {client_address} timed out waiting for authentication.")
+            await websocket.close(code=1002, reason="Authentication timed out")
+            return
+        except (json.JSONDecodeError, websockets.exceptions.ConnectionClosed) as e:
+            self.logger.warning(f"WebSocket connection failed during authentication phase from {client_address}: {e}")
+            await websocket.close(code=1002, reason="Authentication failed")
+            return
         except Exception as e:
-            self.logger.debug(f"Could not determine client address: {e}")
-        
-        self.logger.info(f"New WebSocket connection from {client_address}")
-        
-        
+            self.logger.error(f"Unexpected error during WebSocket authentication from {client_address}: {e}")
+            await websocket.close(code=1011, reason="Internal server error during authentication")
+            return
+
+        self.clients.add(websocket)
+        self.logger.info(f"New authenticated WebSocket connection from {client_address} added to client pool.")
         self.error_handler.track_connection_attempt(success=True)
         
-        
-        self.clients.add(websocket)
-        
         try:
-            
             welcome_message = {
                 "type": "welcome",
+                "message": "Connection authenticated and established.",
                 "server": "RBW Discord Bot WebSocket",
                 "timestamp": asyncio.get_event_loop().time()
             }
             await self.send_to_client(websocket, welcome_message)
-            
             
             async for message in websocket:
                 await self.handle_message(websocket, message)
                 
         except websockets.exceptions.ConnectionClosed as e:
             self.logger.info(f"WebSocket connection closed: {client_address} (code: {e.code}, reason: {e.reason})")
-            
             self.error_handler.connection_health['disconnections'] += 1
         except websockets.exceptions.WebSocketException as e:
             self.error_handler.track_connection_attempt(success=False)
@@ -236,7 +253,6 @@ class WebSocketManager:
             self.error_handler.track_connection_attempt(success=False)
             await self.error_handler.handle_connection_error(websocket, e)
         finally:
-            
             self.clients.discard(websocket)
             self.logger.info(f"Removed client {client_address} from active connections")
     
